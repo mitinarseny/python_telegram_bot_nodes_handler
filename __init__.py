@@ -4,6 +4,7 @@ from typing import (Any, Callable, Dict, List, Sequence, Tuple, Union)
 
 from telegram import (Bot, Update, TelegramObject, ChatAction, Message,
                       ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton,
+                      InlineKeyboardButton, InlineKeyboardMarkup,
                       Audio, Contact, Document, Location, PhotoSize,
                       Sticker, Video, Voice, Venue, VideoNote, ParseMode)
 from telegram.ext import (Dispatcher, Handler, RegexHandler)
@@ -15,6 +16,7 @@ TO_SEND = Union[TELEGRAM_OBJECT_TO_SEND,
                 Sequence[TELEGRAM_OBJECT_TO_SEND],
                 Sequence[TELEGRAM_OBJECT_WITH_CAPTION_TO_SEND]]
 KEYBOARD = List[List[Union[str, KeyboardButton]]]
+INLINE_KEYBOARD = List[List[InlineKeyboardButton]]
 
 
 class NodesHandler(Handler):
@@ -48,7 +50,7 @@ class NodesHandler(Handler):
         self.root_node.user_status_list = self.user_status_list
 
     def check_update(self, update: Update):
-        user_id = update.message.from_user.id
+        user_id = update.effective_user.id
         user_status = self.user_status_list[user_id]
 
         # check entry
@@ -82,7 +84,7 @@ class NodesHandler(Handler):
         return False
 
     def handle_update(self, update: Update, dispatcher: Dispatcher):
-        user_id = update.message.from_user.id
+        user_id = update.effective_user.id
         user_status = self.user_status_list[user_id]
         dispatcher.bot.send_chat_action(user_id, ChatAction.TYPING)
         handler = user_status.current_handler
@@ -215,6 +217,7 @@ class Node(Handler):
                  hello: TO_SEND = None,
                  reply_keyboard: KEYBOARD = None,
                  remove_keyboard: bool = False,
+                 inline_keyboard: INLINE_KEYBOARD = None,
                  inside_handlers: Sequence[Handler] = (),
                  inside_fallbacks: Sequence[Handler] = (),
                  goodbye: TO_SEND = None,
@@ -227,6 +230,7 @@ class Node(Handler):
         self.__reply_keyboard: KEYBOARD = None
         self.reply_keyboard = reply_keyboard
         self.remove_keyboard: bool = remove_keyboard
+        self.inline_keyboard: INLINE_KEYBOARD = inline_keyboard
         self.inside_handlers: Sequence[Handler] = inside_handlers
         self.inside_fallbacks: Sequence[Handler] = inside_fallbacks
         self.goodbye: TO_SEND = goodbye
@@ -244,7 +248,7 @@ class Node(Handler):
         return self.next_node
 
     def check_update(self, update: Update) -> bool:
-        user_id = update.message.from_user.id
+        user_id = update.effective_user.id
         if not self.user_status_list[user_id].is_inside_current_node:
             if self.check_candidates(update=update, candidates=self.entry_handlers):
                 return True
@@ -255,7 +259,7 @@ class Node(Handler):
         return False
 
     def check_candidates(self, update: Update, candidates: Sequence[Handler]) -> bool:
-        user_id = update.message.from_user.id
+        user_id = update.effective_user.id
         for candidate in candidates:
             if candidate.check_update(update=update):
                 self.user_status_list[user_id].current_node_handler = candidate
@@ -263,9 +267,11 @@ class Node(Handler):
         return False
 
     def handle_update(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.message.from_user.id]
+        user_status = self.user_status_list[update.effective_user.id]
         handler = user_status.current_node_handler
         handle_result = handler.handle_update(update=update, dispatcher=dispatcher)
+        if isinstance(handle_result, Node):
+            user_status.next_node = handle_result
         if handle_result == __class__.INSIDE_NOT_VALID or handler in self.inside_fallbacks:
             if user_status.display_node.entry_handlers:
                 user_status.display_node.entry_handlers[0].handle_update(update=update, dispatcher=dispatcher)
@@ -278,26 +284,28 @@ class Node(Handler):
         return handle_result
 
     def handle_entry(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.message.from_user.id]
+        user_status = self.user_status_list[update.effective_user.id]
         user_status.enter_current_node()
         if self.hello:
             reply_markup = None
             if self.reply_keyboard:
                 reply_markup = ReplyKeyboardMarkup(self.reply_keyboard, resize_keyboard=True)  # do it in __init__()
                 if self.allow_back and user_status.nodes_history.can_back() and self.back_str:
-                    self.add_keyboard_back_button(reply_markup.keyboard)
-            elif self.remove_keyboard:
+                    __class__.add_keyboard_button(reply_markup.keyboard, self.back_str)
+            elif self.inline_keyboard:
+                reply_markup = InlineKeyboardMarkup(self.inline_keyboard)
+            if self.remove_keyboard:
                 reply_markup = ReplyKeyboardRemove()
             self.reply(bot=dispatcher.bot, message=update.message, to_send=self.hello, reply_markup=reply_markup)
         if not self.inside_handlers:
             self.handle_inside(update=update, dispatcher=dispatcher)
 
     def handle_inside(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.message.from_user.id]
+        user_status = self.user_status_list[update.effective_user.id]
         if self.goodbye:
             self.reply(bot=dispatcher.bot, message=update.message, to_send=self.goodbye)
         user_status.exit_current_node()
-        next_node = self.next_node or user_status.next_node
+        next_node = user_status.next_node or self.next_node
         if next_node:
             next_node.user_status_list = self.user_status_list
             user_status.display_node = next_node
@@ -322,14 +330,15 @@ class Node(Handler):
             self.reply_object(message=message, obj=to_send, reply_markup=reply_markup)
         else:
             for _ in range(len(to_send) - 1):
-                self.reply_object(message=message, obj=to_send[_])
+                self.reply_object(message=message, obj=to_send[_], silent=True)
                 bot.send_chat_action(message.from_user.id, ChatAction.TYPING)
             self.reply_object(message=message, obj=to_send[-1], reply_markup=reply_markup)
 
     def reply_object(self,
                      message: Message,
                      obj: Union[TELEGRAM_OBJECT_TO_SEND, TELEGRAM_OBJECT_WITH_CAPTION_TO_SEND],
-                     reply_markup: Union[ReplyKeyboardMarkup, ReplyKeyboardRemove] = None):
+                     reply_markup: Union[ReplyKeyboardMarkup, ReplyKeyboardRemove] = None,
+                     silent: bool = False):
         caption = None
         if isinstance(obj, list) or isinstance(obj, tuple):
             if len(obj) == 2 and obj[0].__class__ in ALLOWED_TELEGRAM_OBJECTS_WITH_CAPTION:
@@ -338,27 +347,27 @@ class Node(Handler):
             else:
                 raise AttributeError
         if isinstance(obj, str):
-            message.reply_text(obj, reply_markup=reply_markup, parse_mode=self.parse_mode)
+            message.reply_text(obj, reply_markup=reply_markup, parse_mode=self.parse_mode, disable_notification=silent)
         elif isinstance(obj, Audio):
-            message.reply_audio(obj, caption=caption, reply_markup=reply_markup)
+            message.reply_audio(obj, caption=caption, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, Contact):
-            message.reply_contact(obj, reply_markup=reply_markup)
+            message.reply_contact(obj, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, Document):
-            message.reply_document(obj, caption=caption, reply_markup=reply_markup)
+            message.reply_document(obj, caption=caption, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, Location):
-            message.reply_location(location=obj, reply_markup=reply_markup)
+            message.reply_location(location=obj, reply_markup=reply_markup, disable_notification=silent)
         if isinstance(obj, PhotoSize):
-            message.reply_photo(obj, caption=caption, reply_markup=reply_markup)
+            message.reply_photo(obj, caption=caption, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, Sticker):
-            message.reply_sticker(obj, reply_markup=reply_markup)
+            message.reply_sticker(obj, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, Venue):
-            message.reply_venue(obj, reply_markup=reply_markup)
+            message.reply_venue(obj, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, Video):
-            message.reply_video(obj, caption=caption, reply_markup=reply_markup)
+            message.reply_video(obj, caption=caption, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, VideoNote):
-            message.reply_video_note(obj, reply_markup=reply_markup)
+            message.reply_video_note(obj, reply_markup=reply_markup, disable_notification=silent)
         elif isinstance(obj, Voice):
-            message.reply_voice(obj, caption=caption, reply_markup=reply_markup)
+            message.reply_voice(obj, caption=caption, reply_markup=reply_markup, disable_notification=silent)
 
     @property
     def reply_keyboard(self) -> Union[KEYBOARD, None]:
@@ -370,11 +379,13 @@ class Node(Handler):
     def reply_keyboard(self, keyboard: KEYBOARD):
         self.__reply_keyboard = keyboard
 
-    def add_keyboard_back_button(self, keyboard: KEYBOARD):
-        if keyboard and len(keyboard[-1]) == 1:
-            keyboard[-1].append(self.back_str)
+    @staticmethod
+    def add_keyboard_button(keyboard: KEYBOARD, btn: Union[KeyboardButton, InlineKeyboardButton, str],
+                            max_row_len: int = 2):
+        if keyboard and len(keyboard[-1]) < max_row_len:
+            keyboard[-1].append(btn)
         else:
-            keyboard.append([self.back_str])
+            keyboard.append([btn])
 
     def __repr__(self):
         return '<{cls} hello: \'{hello}\'>'.format(cls=self.__class__.__name__, hello=self.hello)
@@ -388,6 +399,7 @@ class NamedNode(Node):
                  hello: TO_SEND = None,
                  reply_keyboard: KEYBOARD = None,
                  remove_keyboard: bool = False,
+                 inline_keyboard: INLINE_KEYBOARD = None,
                  inside_handlers: Sequence[Handler] = (),
                  inside_fallbacks: Sequence[Handler] = (),
                  goodbye: TO_SEND = None,
@@ -404,6 +416,7 @@ class NamedNode(Node):
             hello=hello,
             reply_keyboard=reply_keyboard,
             remove_keyboard=remove_keyboard,
+            inline_keyboard=inline_keyboard,
             inside_handlers=inside_handlers,
             inside_fallbacks=inside_fallbacks,
             goodbye=goodbye,
@@ -451,14 +464,14 @@ class SwitchNode(Node):
             entry_handlers=entry_handlers,
             hello=hello,
             reply_keyboard=keyboard,
-            remove_keyboard=remove_keyboard,  # ????
+            remove_keyboard=remove_keyboard,
             inside_handlers=inside_handlers,
             goodbye=goodbye,
             switch_on_this=switch_on_this,
             allow_back=allow_back)
 
     def handle_inside(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.message.from_user.id]
+        user_status = self.user_status_list[update.effective_user.id]
         handler = user_status.current_node_handler
         for switch_node in self.switch_nodes:
             if handler in switch_node.entry_handlers:
