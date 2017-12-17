@@ -1,4 +1,5 @@
 import copy
+import logging
 import re
 from typing import (Any, Callable, Dict, List, Sequence, Tuple, Union)
 
@@ -19,7 +20,119 @@ KEYBOARD = List[List[Union[str, KeyboardButton]]]
 INLINE_KEYBOARD = List[List[InlineKeyboardButton]]
 
 
+class UserStatusStorage(object):
+    logger = logging.getLogger(__name__)
+
+    def __init__(self):
+        self._: Dict[int, UserStatus] = {}
+
+    def init_user(self, user_id: int):
+        self._[user_id] = UserStatus(user_id)
+        self.logger.info('New user inited! user_id: {user_id},'
+                         ' total_user_number: {total}'
+                         .format(user_id=user_id,
+                                 total=len(self)))
+
+    def user_status(self, user_id: int) -> 'UserStatus':
+        return self._[user_id]
+
+    def __len__(self):
+        return len(self._)
+
+    def __contains__(self, user_id: int):
+        return user_id in self._
+
+    def __getitem__(self, user_id: int) -> 'UserStatus':
+        if user_id not in self:
+            self.init_user(user_id=user_id)
+        return self.user_status(user_id=user_id)
+
+    def __repr__(self):
+        return '<{cls} len: {len}>'.format(cls=self.__class__.__name__, len=len(self))
+
+
+class UserStatus(object):
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        self.nodes_handler_entered: bool = False
+        self.current_handler: Handler = None
+        self.current_node_handler: Handler = None
+        self.nodes_history: NodeIndexHistory = NodeIndexHistory(self.user_id)
+        self.display_node_id: int = None
+        self.is_inside_current_node: bool = False
+        self.next_node: Node = None
+
+    @property
+    def display_node(self):
+        return Node.nodes_storage[self.display_node_id]
+
+    @display_node.setter
+    def display_node(self, display_node: 'Node'):
+        if isinstance(display_node, Node):
+            self.display_node_id = display_node.id
+        elif display_node is None:
+            self.display_node_id = None
+
+    def enter_current_node(self):
+        self.is_inside_current_node = True
+
+    def exit_current_node(self):
+        self.is_inside_current_node = False
+
+    def enter_nodes_handler(self):
+        self.nodes_handler_entered = True
+
+    def exit_nodes_handler(self):
+        self.nodes_handler_entered = False
+
+    def __repr__(self):
+        return '<{cls} entered: {entered}, current_node: {current_node}, ' \
+               'display_node: {display_node}, is_inside_current_node: {is_inside_current_node}, ' \
+               'current_handler: {current_handler}, nodes_history: {nodes_history}>' \
+            .format(cls=self.__class__.__name__,
+                    entered=self.nodes_handler_entered,
+                    current_node=self.nodes_history.current(),
+                    display_node=self.display_node,
+                    is_inside_current_node=self.is_inside_current_node,
+                    current_handler=self.current_handler,
+                    nodes_history=self.nodes_history)
+
+
+class NodeIndexHistory(object):
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        self._: List[int] = []
+
+    def add(self, node: 'Node'):
+        if self.current():
+            Node.nodes_storage[node.id].back_str = self.current().back_str
+        self._.append(node.id)
+
+    def set_root(self, root_node: 'Node'):
+        self._ = [root_node.id]
+
+    def current(self) -> Union['Node', None]:
+        if len(self._):
+            return Node.nodes_storage[self._[-1]]
+        return None
+
+    def can_back(self) -> bool:
+        return len(self._) > 1
+
+    def back(self) -> 'Node':
+        self._.pop()
+        return self.current()
+
+    def __len__(self):
+        return len(self._)
+
+    def __repr__(self):
+        return '<{cls} nodes_number: {nn}>'.format(cls=self.__class__.__name__, nn=len(self))
+
+
 class NodesHandler(Handler):
+    user_status_storage: UserStatusStorage = UserStatusStorage()
+
     def __init__(self,
                  root_node: 'Node',
                  entry_handlers: List[Handler] = (),
@@ -45,13 +158,12 @@ class NodesHandler(Handler):
         self.exit_handlers: List[Handler] = exit_handlers
         self.allow_reentry: bool = allow_reentry
 
-        self.user_status_list: UserStatusList = UserStatusList()
         self.root_node.back_str = self.back_str
-        self.root_node.user_status_list = self.user_status_list
+        self.root_node.user_status_storage = self.user_status_storage
 
     def check_update(self, update: Update):
         user_id = update.effective_user.id
-        user_status = self.user_status_list[user_id]
+        user_status = self.user_status_storage[user_id]
 
         # check entry
         if not user_status.nodes_handler_entered or self.allow_reentry:
@@ -85,7 +197,7 @@ class NodesHandler(Handler):
 
     def handle_update(self, update: Update, dispatcher: Dispatcher):
         user_id = update.effective_user.id
-        user_status = self.user_status_list[user_id]
+        user_status = self.user_status_storage[user_id]
         dispatcher.bot.send_chat_action(user_id, ChatAction.TYPING)
         handler = user_status.current_handler
         handle_result = handler.handle_update(update=update, dispatcher=dispatcher)
@@ -114,101 +226,11 @@ class NodesHandler(Handler):
         pass
 
     def __repr__(self):
-        return '<{cls} user_status_list: {usl}>'.format(cls=self.__class__.__name__, usl=self.user_status_list)
-
-
-class UserStatusList(object):
-    def __init__(self):
-        self._: Dict[int, UserStatus] = {}
-
-    def init_user(self, user_id: int):
-        self._[user_id] = UserStatus()
-
-    def user_status(self, user_id: int) -> 'UserStatus':
-        return self._[user_id]
-
-    def __len__(self):
-        return len(self._)
-
-    def __contains__(self, user_id: int):
-        return user_id in self._
-
-    def __getitem__(self, user_id: int) -> 'UserStatus':
-        if user_id not in self:
-            self.init_user(user_id=user_id)
-        return self._[user_id]
-
-    def __repr__(self):
-        return '<{cls} len: {len}>'.format(cls=self.__class__.__name__, len=len(self))
-
-
-class UserStatus(object):
-    def __init__(self):
-        self.nodes_handler_entered: bool = False
-        self.current_handler: Handler = None
-        self.current_node_handler: Handler = None
-        self.nodes_history: NodesHistory = NodesHistory()
-        self.display_node: Node = None
-        self.is_inside_current_node: bool = False
-        self.next_node: Node = None
-
-    def enter_current_node(self):
-        self.is_inside_current_node = True
-
-    def exit_current_node(self):
-        self.is_inside_current_node = False
-
-    def enter_nodes_handler(self):
-        self.nodes_handler_entered = True
-
-    def exit_nodes_handler(self):
-        self.nodes_handler_entered = False
-
-    def __repr__(self):
-        return '<{cls} entered: {entered}, current_node: {current_node}, ' \
-               'display_node: {display_node}, is_inside_current_node: {is_inside_current_node}, ' \
-               'current_handler: {current_handler}, nodes_history: {nodes_history}>' \
-            .format(cls=self.__class__.__name__,
-                    entered=self.nodes_handler_entered,
-                    current_node=self.nodes_history.current(),
-                    display_node=self.display_node,
-                    is_inside_current_node=self.is_inside_current_node,
-                    current_handler=self.current_handler,
-                    nodes_history=self.nodes_history)
-
-
-class NodesHistory(object):
-    def __init__(self):
-        self._: List[Node] = []
-
-    def add(self, node: 'Node'):
-        if self.current():
-            node.back_str = self.current().back_str
-        self._.append(node)
-
-    def set_root(self, root_node: 'Node'):
-        self._ = [root_node]
-
-    def current(self) -> Union['Node', None]:
-        if len(self._):
-            return self._[-1]
-        return None
-
-    def can_back(self) -> bool:
-        return len(self._) > 1
-
-    def back(self) -> 'Node':
-        self._.pop()
-        return self._[-1]
-
-    def __len__(self):
-        return len(self._)
-
-    def __repr__(self):
-        return '<{cls} nodes_number: {nn}>'.format(cls=self.__class__.__name__, nn=len(self))
+        return '<{cls} user_status_list: {usl}>'.format(cls=self.__class__.__name__, usl=self.user_status_storage)
 
 
 class Node(Handler):
+    nodes_storage: Dict[int, 'Node'] = {}
     INSIDE_NOT_VALID = -1
 
     def __init__(self,
@@ -224,6 +246,9 @@ class Node(Handler):
                  parse_mode: str = ParseMode.MARKDOWN,
                  switch_on_this: bool = True,
                  allow_back: bool = True):
+        self.id: int = len(Node.nodes_storage)
+        Node.nodes_storage[self.id] = self
+
         self.entry_handlers: Sequence[Handler] = entry_handlers
         self.auto_entry: bool = auto_entry
         self.hello: TO_SEND = hello
@@ -236,7 +261,6 @@ class Node(Handler):
         self.goodbye: TO_SEND = goodbye
         self.parse_mode = parse_mode
 
-        self.user_status_list: UserStatusList = None
         self.switch_on_this: bool = switch_on_this
         self.allow_back = allow_back
 
@@ -249,7 +273,7 @@ class Node(Handler):
 
     def check_update(self, update: Update) -> bool:
         user_id = update.effective_user.id
-        if not self.user_status_list[user_id].is_inside_current_node:
+        if not NodesHandler.user_status_storage[user_id].is_inside_current_node:
             if self.check_candidates(update=update, candidates=self.entry_handlers):
                 return True
         elif self.check_candidates(update=update, candidates=self.inside_handlers):
@@ -262,12 +286,12 @@ class Node(Handler):
         user_id = update.effective_user.id
         for candidate in candidates:
             if candidate.check_update(update=update):
-                self.user_status_list[user_id].current_node_handler = candidate
+                NodesHandler.user_status_storage[user_id].current_node_handler = candidate
                 return True
         return False
 
     def handle_update(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.effective_user.id]
+        user_status = NodesHandler.user_status_storage[update.effective_user.id]
         handler = user_status.current_node_handler
         handle_result = handler.handle_update(update=update, dispatcher=dispatcher)
         if isinstance(handle_result, Node):
@@ -284,7 +308,7 @@ class Node(Handler):
         return handle_result
 
     def handle_entry(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.effective_user.id]
+        user_status = NodesHandler.user_status_storage[update.effective_user.id]
         user_status.enter_current_node()
         if self.hello:
             reply_markup = None
@@ -301,13 +325,12 @@ class Node(Handler):
             self.handle_inside(update=update, dispatcher=dispatcher)
 
     def handle_inside(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.effective_user.id]
+        user_status = NodesHandler.user_status_storage[update.effective_user.id]
         if self.goodbye:
             self.reply(bot=dispatcher.bot, message=update.message, to_send=self.goodbye)
         user_status.exit_current_node()
         next_node = user_status.next_node or self.next_node
         if next_node:
-            next_node.user_status_list = self.user_status_list
             user_status.display_node = next_node
             if user_status.display_node.switch_on_this:
                 user_status.nodes_history.add(user_status.display_node)
@@ -471,7 +494,7 @@ class SwitchNode(Node):
             allow_back=allow_back)
 
     def handle_inside(self, update: Update, dispatcher: Dispatcher):
-        user_status = self.user_status_list[update.effective_user.id]
+        user_status = NodesHandler.user_status_storage[update.effective_user.id]
         handler = user_status.current_node_handler
         for switch_node in self.switch_nodes:
             if handler in switch_node.entry_handlers:
