@@ -31,31 +31,10 @@ class UserStatusStorage(object):
 
     def init_user(self, user_id: int):
         self._[user_id] = UserStatus(user_id, self.r)
-        self.init_from_storage(user_id)
         self.logger.info('New user inited! user_id: {user_id},'
                          ' total_user_number: {total}'
                          .format(user_id=user_id,
                                  total=len(self)))
-
-    def init_from_storage(self, user_id: int):
-        _field = self.get_field(user_id, 'nodes_handler_entered')
-        if _field:
-            self.user_status(user_id).nodes_handler_entered = _field
-        _field = self.get_field(user_id, 'nodes_history')
-        if _field:
-            self.user_status(user_id).nodes_history._ = json.loads(_field)
-        _field = self.get_field(user_id, 'display_node_id')
-        if _field:
-            self.user_status(user_id).display_node_id = _field
-        _field = self.get_field(user_id, 'is_inside_current_node')
-        if _field:
-            self.user_status(user_id).is_inside_current_node = _field
-
-    def get_field(self, user_id: int, field_name: str):
-        return self.r.get('{user_id}_{field_name}'.format(
-            user_id=user_id,
-            field_name=field_name
-        ))
 
     def user_status(self, user_id: int) -> 'UserStatus':
         return self._[user_id]
@@ -87,6 +66,21 @@ class UserStatus(object):
         self.next_node: Node = None
 
         self.r = strict_redis
+        self.init_from_storage()
+
+    def init_from_storage(self):
+        _field = self.get_field('nodes_handler_entered')
+        if _field:
+            self.nodes_handler_entered = _field
+        _field = self.get_field('nodes_history')
+        if _field:
+            self.nodes_history._ = json.loads(_field)
+        _field = self.get_field('display_node_id')
+        if _field:
+            self.display_node_id = _field
+        _field = self.get_field('is_inside_current_node')
+        if _field:
+            self.is_inside_current_node = _field
 
     @property
     def display_node(self):
@@ -130,8 +124,17 @@ class UserStatus(object):
     def exit_nodes_handler(self):
         self.nodes_handler_entered = False
 
+    def get_field(self, field_name: str):
+        return self.r.get('{user_id}_{field_name}'.format(
+            user_id=self.user_id,
+            field_name=field_name
+        ))
+
     def set_field(self, field: str, value):
-        self.r.set('{user_id}_{field_name}'.format(user_id=self.user_id, field_name=field), value)
+        self.r.set('{user_id}_{field_name}'.format(
+            user_id=self.user_id,
+            field_name=field
+        ), value)
 
     def __repr__(self):
         return '<{cls} entered: {entered}, current_node: {current_node}, ' \
@@ -153,8 +156,6 @@ class NodeIndexHistory(object):
         self._: List[int] = []
 
     def add(self, node: 'Node'):
-        if self.current():
-            Node.nodes_storage[node.id].back_str = self.current().back_str
         self._.append(node.id)
         self.set_field('nodes_history', json.dumps(self._))
 
@@ -202,6 +203,7 @@ class NodesHandler(Handler):
         self.entry_handlers: List[Handler] = entry_handlers
         self.back_handlers: List[Handler] = back_handlers
         self.back_str: str = back_str
+        Node.back_str = self.back_str
         self.back_callback = back_callback or __class__.default_back_callback
         if not self.back_handlers and self.back_str:
             self.back_handlers: List[Handler] = [RegexHandler(
@@ -286,6 +288,7 @@ class NodesHandler(Handler):
 
 class Node(Handler):
     nodes_storage: Dict[int, 'Node'] = {}
+    back_str: str = None
     INSIDE_NOT_VALID = -1
 
     def __init__(self,
@@ -320,7 +323,6 @@ class Node(Handler):
         self.allow_back = allow_back
 
         self.next_node: Node = None
-        self.back_str: str = None
 
     def next(self, next_node: 'Node'):
         self.next_node = next_node
