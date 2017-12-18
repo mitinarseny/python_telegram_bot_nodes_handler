@@ -26,7 +26,8 @@ class UserStatusStorage(object):
     logger = logging.getLogger(__name__)
 
     def __init__(self):
-        self.r = redis.StrictRedis(host='localhost', port=6379, db=0)
+        self.r = redis.StrictRedis(host='ec2-35-168-41-119.compute-1.amazonaws.com', port=13909, db=0,
+                                   password='pabab3805e962f88d130c3d69cc2c9500e13983cbddecc15a26468782e6dba95b')
         self._: Dict[int, UserStatus] = {}
 
     def init_user(self, user_id: int):
@@ -76,8 +77,8 @@ class UserStatus(object):
         if _field:
             self.nodes_history._ = json.loads(_field)
         _field = self.get_field('display_node_id')
-        if _field:
-            self.display_node_id = _field
+        if _field is not None:
+            self.display_node_id = int(_field)
         _field = self.get_field('is_inside_current_node')
         if _field:
             self.is_inside_current_node = _field
